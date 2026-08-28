@@ -7,7 +7,6 @@ from PyPDF2 import PdfMerger, PdfReader
 
 st.set_page_config(page_title="Sistema Contable - Hospital Lagomaggiore", page_icon="📁", layout="wide")
 
-# --- CREDENCIALES DEL SISTEMA ---
 USUARIOS = {
     "empleado1": "clave123",
     "empleado2": "clave456",
@@ -36,20 +35,43 @@ def verificar_login():
         return False
     return True
 
-def extraer_cuit(ruta_pdf):
-    """Busca un CUIT válido dentro del texto del PDF"""
+def clasificar_y_extraer_datos(ruta_pdf):
+    """
+    Analiza el PDF para determinar su tipo (Factura, Monotributo, ATM)
+    y extrae el CUIT del contribuyente emisor/titular de manera precisa.
+    """
+    tipo_doc = "OTRO"
+    cuit_encontrado = "SIN_CUIT"
+    
     try:
         reader = PdfReader(ruta_pdf)
         texto = ""
         for pagina in reader.pages:
-            texto += pagina.extract_text() or ""
-        
-        match = re.search(r'\b(20|23|27|30|33|34)-?\d{8}-?\d{1}\b', texto)
-        if match:
-            return match.group(0).replace("-", "")
+            texto += (pagina.extract_text() or "").upper()
+
+        # Identificar tipo de documento
+        if "FACTURA" in texto or "CAE N°" in texto or "PUNTO DE VENTA" in texto:
+            tipo_doc = "FACTURA"
+        elif "MONOTRIBUTO" in texto or "VEP" in texto or "OBLIGACION MENSUAL" in texto:
+            tipo_doc = "MONOTRIBUTO"
+        elif "ATM" in texto or "ADMINISTRACION TRIBUTARIA MENDOZA" in texto or "CUMPLIMIENTO FISCAL" in texto:
+            tipo_doc = "ATM"
+
+        # Buscar CUITs en el texto (excluyendo el del Hospital si aparece)
+        cuits = re.findall(r'\b(20|23|27|30|33|34)-?\d{8}-?\d{1}\b', texto)
+        if cuits:
+            # Tomamos el primer CUIT que no sea de un cliente masivo típico si fuera necesario, 
+            # pero filtramos para que sea coherente.
+            cuit_limpio = cuits[0] if isinstance(cuits[0], str) else cuits[0][0] # por seguridad
+            # Buscamos específicamente formato con guiones o sin guiones
+            match_cuit_completo = re.search(r'\b(?:20|23|27|30|33|34)-?\d{8}-?\d{1}\b', texto)
+            if match_cuit_completo:
+                cuit_encontrado = match_cuit_completo.group(0).replace("-", "")
+
     except Exception:
         pass
-    return "SIN_CUIT_IDENTIFICADO"
+        
+    return tipo_doc, cuit_encontrado
 
 if verificar_login():
     st.sidebar.success(f"Conectado: **{st.session_state.usuario_actual}**")
@@ -57,14 +79,13 @@ if verificar_login():
         st.session_state.autenticado = False
         st.rerun()
 
-    st.title("📁 Sistema de Procesamiento y Gestión por CUIT")
-    st.write("Agrupación automática de documentación, generación de ZIP y enlaces directos a Gmail y WhatsApp.")
+    st.title("📁 Sistema de Unificación Ordenada por CUIT")
+    st.write("Clasificación estricta: 1º Factura, 2º Monotributo, 3º ATM agrupados por contribuyente.")
 
-    # Correo fijo del hospital para los enlaces de Gmail
     correo_hospital = "facturaslagomaggiore@gmail.com"
 
     archivos_subidos = st.file_uploader(
-        "Subir lote masivo de PDFs (Facturas, Monotributo, ATM de todos los clientes)", 
+        "Subir lote masivo de PDFs (Facturas, Monotributo, ATM)", 
         type=["pdf"], 
         accept_multiple_files=True
     )
@@ -72,11 +93,11 @@ if verificar_login():
     if archivos_subidos:
         st.info(f"Total de archivos cargados: {len(archivos_subidos)}")
 
-        if st.button("Procesar y Generar Expedientes por Cliente"):
+        if st.button("Procesar, Ordenar y Agrupar por Cliente"):
             clientes_dict = {}
             rutas_temporales = []
 
-            with st.spinner("Analizando documentos y detectando CUITs..."):
+            with st.spinner("Analizando y clasificando documentos por contribuyente..."):
                 for archivo in archivos_subidos:
                     ruta_temp = os.path.join(CARPETA_TEMPORAL, archivo.name)
                     try:
@@ -84,26 +105,33 @@ if verificar_login():
                             f.write(archivo.getbuffer())
                         rutas_temporales.append(ruta_temp)
 
-                        cuit = extraer_cuit(ruta_temp)
+                        tipo_doc, cuit = clasificar_y_extraer_datos(ruta_temp)
+                        
                         if cuit not in clientes_dict:
-                            clientes_dict[cuit] = []
-                        clientes_dict[cuit].append(ruta_temp)
+                            clientes_dict[cuit] = {"FACTURA": [], "MONOTRIBUTO": [], "ATM": [], "OTRO": []}
+                        
+                        clientes_dict[cuit][tipo_doc].append(ruta_temp)
                     except Exception:
                         pass
 
-            st.success(f"¡Proceso exitoso! Se armaron expedientes para {len(clientes_dict)} clientes.")
+            st.success(f"¡Proceso exitoso! Se identificaron {len(clientes_dict)} contribuyentes.")
 
-            zip_path = os.path.join(CARPETA_TEMPORAL, "Clientes_Unificados_Hospital.zip")
+            # Generación del ZIP ordenado estrictamente: Factura -> Monotributo -> ATM
+            zip_path = os.path.join(CARPETA_TEMPORAL, "Expedientes_Ordenados_Hospital.zip")
             archivos_generados = {}
             
             with zipfile.ZipFile(zip_path, 'w') as zipf:
-                for cuit, lista_archivos in clientes_dict.items():
+                for cuit, docs in clientes_dict.items():
                     merger = PdfMerger()
-                    for f_path in lista_archivos:
-                        try:
-                            merger.append(f_path)
-                        except Exception:
-                            pass
+                    
+                    # Orden estricto solicitado
+                    orden_tipos = ["FACTURA", "MONOTRIBUTO", "ATM", "OTRO"]
+                    for tipo in orden_tipos:
+                        for f_path in docs[tipo]:
+                            try:
+                                merger.append(f_path)
+                            except Exception:
+                                pass
                     
                     nombre_salida = f"Cliente_CUIT_{cuit}_Unificado.pdf"
                     ruta_salida_cliente = os.path.join(CARPETA_TEMPORAL, nombre_salida)
@@ -116,63 +144,57 @@ if verificar_login():
                     except Exception:
                         pass
 
-            st.markdown("### 📥 Descarga Masiva de Expedientes")
-            st.write("Descargá el archivo comprimido con todos los PDFs unificados por CUIT listos para adjuntar en tu correo:")
+            st.markdown("### 📥 Descarga de Expedientes Ordenados")
             with open(zip_path, "rb") as f:
                 st.download_button(
-                    label="📦 Descargar ZIP con todos los PDFs separados",
+                    label="📦 Descargar ZIP con PDFs ordenados (Factura -> Monotributo -> ATM)",
                     data=f,
-                    file_name="Documentacion_Clientes_Unificada.zip",
+                    file_name="Expedientes_Ordenados_Hospital.zip",
                     mime="application/zip"
                 )
 
             st.markdown("---")
-            st.markdown("### 📨 Gestión Individual por Cliente (Gmail y WhatsApp)")
-            st.write("Desde aquí podés abrir directamente el correo prearmado para Gmail o enviar las alertas de WhatsApp.")
+            st.markdown("### 📨 Panel de Control y Enlaces")
 
-            for cuit, lista_archivos in clientes_dict.items():
-                with st.expander(f"Cliente CUIT: {cuit} ({len(lista_archivos)} archivos relacionados)"):
-                    col1, col2 = st.columns(2)
+            for cuit, docs in clientes_dict.items]:
+                total_archivos = len(docs["FACTURA"]) + len(docs["MONOTRIBUTO"]) + len(docs["ATM"]) + len(docs["OTRO"])
+                with st.expander(f"CUIT: {cuit} — Documentos detectados: {total_archivos} (Facturas: {len(docs['FACTURA'])}, Monotributo: {len(docs['MONOTRIBUTO'])}, ATM: {len(docs['ATM'])})"):
                     
+                    col1, col2 = st.columns(2)
                     with col1:
-                        st.markdown("#### ✉️ Envío de Correo (Gmail)")
+                        st.markdown("#### ✉️ Correo (Gmail)")
                         asunto_mail = f"Documentación Mensual - CUIT: {cuit}"
-                        cuerpo_mail = f"Estimados,\n\nAdjuntamos la documentación unificada correspondiente al CUIT {cuit}.\n\nAtentamente,\nEstudio Contable CGL."
+                        cuerpo_mail = f"Estimados,\n\nAdjuntamos la documentación unificada (Factura, Monotributo y ATM) correspondiente al CUIT {cuit}.\n\nAtentamente,\nEstudio Contable CGL."
                         
-                        # Generador de enlace oficial de Gmail web (abre sesión de egl.estudiocontable@gmail.com)
                         gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={correo_hospital}&su={urllib.parse.quote(asunto_mail)}&body={urllib.parse.quote(cuerpo_mail)}"
-                        st.markdown(f"[✉️ Redactar correo en Gmail para CUIT {cuit}]({gmail_url})", unsafe_allow_html=True)
-                        st.caption("*(Recordá adjuntar el PDF descargado del CUIT correspondiente)*")
+                        st.markdown(f"[✉️ Abrir Gmail para CUIT {cuit}]({gmail_url})", unsafe_allow_html=True)
+                        st.caption("*(Adjuntá el PDF del CUIT descargado desde el ZIP)*")
 
                     with col2:
                         st.markdown("#### 💬 Alertas de WhatsApp")
-                        telefono = st.text_input(f"Celular de contacto ({cuit})", placeholder="Ej: 2615555555", key=f"tel_{cuit}")
-                        
+                        telefono = st.text_input(f"Celular ({cuit})", placeholder="Ej: 2615555555", key=f"tel_{cuit}")
                         if telefono:
                             tipo_reclamo = st.selectbox(
-                                f"Motivo de contacto:",
+                                "Motivo:",
                                 [
                                     "Falta comprobante de pago de Monotributo",
                                     "Contraseña de ARCA / ATM incorrecta o vencida",
                                     "Figura deuda pendiente en ATM",
-                                    "Documentación incompleta / Faltante general"
+                                    "Documentación incompleta"
                                 ],
-                                key=f"motivo_{cuit}"
+                                key=f"mot__{cuit}"
                             )
-
                             if "Monotributo" in tipo_reclamo:
-                                mensaje_wa = f"Hola! Te escribo del estudio contable. Al revisar tu CUIT {cuit}, notamos que aún no figura registrado el pago del monotributo de este periodo. Podrás enviarnos el comprobante de pago por este medio?"
+                                msg_wa = f"Hola! Del estudio contable. Para el CUIT {cuit} aún no figura el pago del monotributo. Podrás enviarnos el comprobante?"
                             elif "ARCA" in tipo_reclamo:
-                                mensaje_wa = f"Hola! Te escribo del estudio contable. Tuvimos un inconveniente al ingresar a tus cuentas de ARCA / ATM ya que la contraseña figura como incorrecta o vencida. Podrás pasarnos la clave actualizada?"
+                                msg_wa = f"Hola! Del estudio contable. La contraseña de ARCA / ATM del CUIT {cuit} figura incorrecta o vencida. Nos pasas la clave?"
                             elif "deuda" in tipo_reclamo:
-                                mensaje_wa = f"Hola! Te escribo del estudio contable. Al consultar tus tributos para el CUIT {cuit}, detectamos que figura saldo deudor en ATM. Necesitamos regularizarlo a la brevedad."
+                                msg_wa = f"Hola! Del estudio contable. Detectamos saldo deudor en ATM para el CUIT {cuit}. Necesitamos regularizarlo."
                             else:
-                                mensaje_wa = f"Hola! Te escribo del estudio contable. Estamos armando tu documentación del CUIT {cuit} y nos está faltando parte de la información requerida. Podrás enviárnosla?"
+                                msg_wa = f"Hola! Del estudio contable. Falta documentación para armar el expediente del CUIT {cuit}."
 
-                            link_wa = f"https://wa.me/549{telefono}?text={urllib.parse.quote(mensaje_wa)}"
-                            st.markdown(f"[💬 Abrir WhatsApp con reclamo]({link_wa})", unsafe_allow_html=True)
-                        else:
-                            st.caption("Ingresá el celular para habilitar el botón de WhatsApp.")
+                            link_wa = f"https://wa.me/549{telefono}?text={urllib.parse.quote(msg_wa)}"
+                            st.markdown(f"[💬 Enviar WhatsApp]({link_wa})", unsafe_allow_html=True)
 
             for ruta in rutas_temporales:
                 if os.path.exists(ruta):
