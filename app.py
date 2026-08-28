@@ -2,23 +2,21 @@ import streamlit as st
 import os
 import smtplib
 from email.message import EmailMessage
-from pypdf import PdfMerger
+from PyPDF2 import PdfMerger
 
 # Configuración de la página web
 st.set_page_config(page_title="Sistema Contable - Hospital Lagomaggiore", page_icon="📁", layout="centered")
 
 # --- CREDENCIALES DE EMPLEADOS ---
-# Podés modificar o agregar usuarios y contraseñas según tu equipo
 USUARIOS = {
-    "empleado1":"clave123",
-    "empleado2":"clave456",
-    "cristiano":"admin2026"
+    "empleado1": "clave123",
+    "empleado2": "clave456",
+    "cristiano": "admin2026"
 }
 
-# Configuración de Correo (Hospital y Estudio)
+# Configuración de Correo
 CORREO_DESTINO = "facturaslagomaggiore@gmail.com"
 CORREO_ESTUDIO = "tucorreo@estudio.com"
-ESTUDIO_DE_CONTRASEÑAS = "tu_contraseña_de_aplicacion_gmail"
 
 CARPETA_TEMPORAL = "./temp_docs"
 if not os.path.exists(CARPETA_TEMPORAL):
