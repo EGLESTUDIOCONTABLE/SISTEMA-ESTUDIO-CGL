@@ -1,28 +1,24 @@
 import streamlit as st
 import os
+import re
+import zipfile
 import smtplib
 from email.message import EmailMessage
-from PyPDF2 import PdfMerger
+from PyPDF2 import PdfMerger, PdfReader
 
-# Configuración de la página web
-st.set_page_config(page_title="Sistema Contable - Hospital Lagomaggiore", page_icon="📁", layout="centered")
+st.set_page_config(page_title="Sistema Contable - Hospital Lagomaggiore", page_icon="📁", layout="wide")
 
-# --- CREDENCIALES DE EMPLEADOS ---
+# --- CREDENCIALES DEL SISTEMA ---
 USUARIOS = {
     "empleado1": "clave123",
     "empleado2": "clave456",
     "cristiano": "admin2026"
 }
 
-# Configuración de Correo
-CORREO_DESTINO = "facturaslagomaggiore@gmail.com"
-CORREO_ESTUDIO = "tucorreo@estudio.com"
-
 CARPETA_TEMPORAL = "./temp_docs"
 if not os.path.exists(CARPETA_TEMPORAL):
     os.makedirs(CARPETA_TEMPORAL)
 
-# --- SISTEMA DE INICIO DE SESIÓN ---
 def verificar_login():
     if "autenticado" not in st.session_state:
         st.session_state.autenticado = False
@@ -31,7 +27,6 @@ def verificar_login():
         st.subheader("🔒 Acceso al Sistema - Estudio Contable")
         usuario = st.text_input("Usuario")
         clave = st.text_input("Contraseña", type="password")
-        
         if st.button("Ingresar"):
             if usuario in USUARIOS and USUARIOS[usuario] == clave:
                 st.session_state.autenticado = True
@@ -42,43 +37,176 @@ def verificar_login():
         return False
     return True
 
-# Ejecutar control de sesión
+def extraer_cuit(ruta_pdf):
+    """Busca un CUIT válido dentro del texto del PDF"""
+    try:
+        reader = PdfReader(ruta_pdf)
+        texto = ""
+        for pagina in reader.pages:
+            texto += pagina.extract_text() or ""
+        
+        match = re.search(r'\b(20|23|27|30|33|34)-?\d{8}-?\d{1}\b', texto)
+        if match:
+            return match.group(0).replace("-", "")
+    except Exception:
+        pass
+    return "SIN_CUIT_IDENTIFICADO"
+
+def enviar_correo_smtp(remitente, password, destinatario, asunto, cuerpo, archivo_adjunto):
+    """Envía un correo electrónico individual con adjunto mediante SMTP"""
+    try:
+        msg = EmailMessage()
+        msg['Subject'] = asunto
+        msg['From'] = remitente
+        msg['To'] = destinatario
+        msg.set_content(cuerpo)
+
+        with open(archivo_adjunto, 'rb') as f:
+            file_data = f.read()
+            file_name = os.path.basename(archivo_adjunto)
+        
+        msg.add_attachment(file_data, maintype='application', subtype='pdf', filename=file_name)
+
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(remitente, password)
+            smtp.send_message(msg)
+        return True
+    except Exception as e:
+        return str(e)
+
 if verificar_login():
-    st.sidebar.success(f"Conectado como: **{st.session_state.usuario_actual}**")
+    st.sidebar.success(f"Conectado: **{st.session_state.usuario_actual}**")
     if st.sidebar.button("Cerrar Sesión"):
         st.session_state.autenticado = False
         st.rerun()
 
-    st.title("📁 Sistema de Facturación y Unificación")
-    st.write("Herramienta para procesamiento y envío de documentación.")
+    st.title("📁 Sistema de Procesamiento, Envío y Reclamos por CUIT")
+    st.write("Agrupación por cliente, envíos masivos por mail y alertas de WhatsApp personalizadas.")
 
-    # Área de carga de archivos
-    archivos_subidos = st.file_uploader("Subir archivos PDF de los clientes", type=["pdf"], accept_multiple_files=True)
+    with st.expander("⚙️ Configuración de Correo del Estudio (Remitente)"):
+        email_estudio = st.text_input("Correo del Estudio", value="tucorreo@estudio.com")
+        password_estudio = st.text_input("Contraseña de Aplicación de Correo", type="password", placeholder="Clave de 16 dígitos de Gmail")
+        correo_destino_fijo = st.text_input("Correo Destino Predeterminado (Hospital)", value="facturaslagomaggiore@gmail.com")
+
+    archivos_subidos = st.file_uploader(
+        "Subir lote masivo de PDFs (Facturas, Monotributo, ATM de todos los clientes)", 
+        type=["pdf"], 
+        accept_multiple_files=True
+    )
 
     if archivos_subidos:
-        st.write(f"Archivos cargados exitosamente: {len(archivos_subidos)}")
-        
-        if st.button("Procesar y Enviar"):
-            merger = PdfMerger()
+        st.info(f"Total de archivos cargados: {len(archivos_subidos)}")
+
+        if st.button("Procesar y Generar Expedientes por Cliente"):
+            clientes_dict = {}
             rutas_temporales = []
 
-            for archivo in archivos_subidos:
-                ruta_temp = os.path.join(CARPETA_TEMPORAL, archivo.name)
-                with open(ruta_temp, "wb") as f:
-                    f.write(archivo.getbuffer())
-                merger.append(ruta_temp)
-                rutas_temporales.append(ruta_temp)
+            with st.spinner("Analizando documentos y detectando CUITs..."):
+                for archivo in archivos_subidos:
+                    ruta_temp = os.path.join(CARPETA_TEMPORAL, archivo.name)
+                    try:
+                        with open(ruta_temp, "wb") as f:
+                            f.write(archivo.getbuffer())
+                        rutas_temporales.append(ruta_temp)
 
-            archivo_salida = os.path.join(CARPETA_TEMPORAL, "Documentacion_Unificada.pdf")
-            merger.write(archivo_salida)
-            merger.close()
+                        cuit = extraer_cuit(ruta_temp)
+                        if cuit not in clientes_dict:
+                            clientes_dict[cuit] = []
+                        clientes_dict[cuit].append(ruta_temp)
+                    except Exception:
+                        pass
 
-            st.success("¡Los archivos se unificaron correctamente!")
+            st.success(f"¡Proceso exitoso! Se armaron expedientes para {len(clientes_dict)} clientes.")
+
+            zip_path = os.path.join(CARPETA_TEMPORAL, "Clientes_Unificados_Hospital.zip")
+            archivos_generados = {}
             
-            with open(archivo_salida, "rb") as f:
-                st.download_button("Descargar PDF Unificado", f, file_name="Documentacion_Unificada.pdf", mime="application/pdf")
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                for cuit, lista_archivos in clientes_dict.items():
+                    merger = PdfMerger()
+                    for f_path in lista_archivos:
+                        try:
+                            merger.append(f_path)
+                        except Exception:
+                            pass
+                    
+                    nombre_salida = f"Cliente_CUIT_{cuit}_Unificado.pdf"
+                    ruta_salida_cliente = os.path.join(CARPETA_TEMPORAL, nombre_salida)
+                    
+                    try:
+                        merger.write(ruta_salida_cliente)
+                        merger.close()
+                        zipf.write(ruta_salida_cliente, nombre_salida)
+                        archivos_generados[cuit] = ruta_salida_cliente
+                    except Exception:
+                        pass
 
-            # Limpieza de temporales al terminar
+            st.markdown("### 📥 Descarga Masiva")
+            with open(zip_path, "rb") as f:
+                st.download_button(
+                    label="📦 Descargar ZIP con todos los expedientes separados",
+                    data=f,
+                    file_name="Documentacion_Clientes_Unificada.zip",
+                    mime="application/zip"
+                )
+
+            st.markdown("---")
+            st.markdown("### 🚀 Envío Masivo Automatizado de Correos al Hospital")
+            if st.button("📨 Enviar todos los expedientes individualizados al Hospital"):
+                if not email_estudio or not password_estudio:
+                    st.error("Por favor completa el correo del estudio y la contraseña de aplicación arriba.")
+                else:
+                    barra_progreso = st.progress(0)
+                    total_clientes = len(archivos_generados)
+                    exitosos = 0
+
+                    for i, (cuit, ruta_pdf) in enumerate(archivos_generados.items()):
+                        asunto = f"Documentación Mensual - CUIT: {cuit}"
+                        cuerpo = f"Estimados,\n\nAdjuntamos la documentación unificada correspondiente al CUIT {cuit}.\n\nAtentamente,\nEstudio Contable."
+                        
+                        resultado = enviar_correo_smtp(email_estudio, password_estudio, correo_destino_fijo, asunto, cuerpo, ruta_pdf)
+                        if resultado is True:
+                            exitosos += 1
+                        
+                        barra_progreso.progress((i + 1) / total_clientes)
+
+                    st.success(f"¡Envío masivo finalizado! Se enviaron {exitosos} de {total_clientes} correos con éxito.")
+
+            st.markdown("---")
+            st.markdown("### 💬 Panel de Alertas y Reclamos por WhatsApp a Clientes")
+            st.write("Seleccioná el tipo de inconveniente para generar el mensaje directo al celular del cliente correspondiente.")
+
+            for cuit, lista_archivos in clientes_dict.items():
+                with st.expander(f"Cliente CUIT: {cuit} (Gestión de Alertas)"):
+                    telefono = st.text_input(f"Celular de contacto ({cuit})", placeholder="Ej: 2615555555", key=f"tel_{cuit}")
+                    
+                    if telefono:
+                        tipo_reclamo = st.selectbox(
+                            f"Seleccionar motivo de contacto para CUIT {cuit}:",
+                            [
+                                "Falta comprobante de pago de Monotributo",
+                                "Contraseña de ARCA / ATM incorrecta o vencida",
+                                "Figura deuda pendiente en ATM",
+                                "Documentación incompleta / Faltante general"
+                            ],
+                            key=f"motivo_{cuit}"
+                        )
+
+                        # Armado de mensajes personalizados según el problema
+                        if "Monotributo" in tipo_reclamo:
+                            mensaje = f"Hola! Te escribo del estudio contable. Al revisar tu CUIT {cuit}, notamos que aún no figura registrado el pago del monotributo de este periodo. Podrás enviarnos el comprobante de pago por este medio?"
+                        elif "ARCA" in tipo_reclamo:
+                            mensaje = f"Hola! Te escribo del estudio contable. Tuvimos un inconveniente al ingresar a tus cuentas de ARCA / ATM ya que la contraseña figura como incorrecta o vencida. Podrás pasarnos la clave actualizada?"
+                        elif "deuda" in tipo_reclamo:
+                            mensaje = f"Hola! Te escribo del estudio contable. Al consultar tus tributos para el CUIT {cuit}, detectamos que figura saldo deudor en ATM. Necesitamos regularizarlo a la brevedad."
+                        else:
+                            mensaje = f"Hola! Te escribo del estudio contable. Estamos armando tu documentación del CUIT {cuit} y nos está faltando parte de la información requerida. Podrás enviárnosla?"
+
+                        link_wa = f"https://wa.me/549{telefono}?text={mensaje.replace(' ', '%20')}"
+                        st.markdown(f"[💬 Abrir WhatsApp con reclamo redactado]({link_wa})", unsafe_allow_html=True)
+                    else:
+                        st.info("Ingresá el número de celular arriba para habilitar el envío del mensaje de WhatsApp.")
+
             for ruta in rutas_temporales:
                 if os.path.exists(ruta):
                     os.remove(ruta)
