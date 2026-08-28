@@ -35,26 +35,48 @@ def verificar_login():
         return False
     return True
 
-def clasificar_y_extraer_datos(ruta_pdf):
+def identificar_cliente_y_tipo(ruta_pdf):
+    """
+    Identifica de manera precisa el CUIT del emisor real del documento
+    y lo clasifica estrictamente en FACTURA, MONOTRIBUTO o ATM.
+    """
     tipo_doc = "OTRO"
-    cuit_encontrado = "SIN_CUIT"
+    cuit_encontrado = "SIN_CUIT_IDENTIFICADO"
     
     try:
         reader = PdfReader(ruta_pdf)
-        texto = ""
+        texto_completo = ""
         for pagina in reader.pages:
-            texto += (pagina.extract_text() or "").upper()
+            texto_completo += (pagina.extract_text() or "") + "\n"
+        
+        texto_upper = texto_completo.upper()
 
-        if "FACTURA" in texto or "CAE N°" in texto or "PUNTO DE VENTA" in texto:
+        # 1. Clasificación del tipo de documento
+        if "FACTURA" in texto_upper or "CAE N°" in texto_upper or "PUNTO DE VENTA" in texto_upper:
             tipo_doc = "FACTURA"
-        elif "MONOTRIBUTO" in texto or "VEP" in texto or "OBLIGACION MENSUAL" in texto:
+        elif "MONOTRIBUTO" in texto_upper or "VEP" in texto_upper or "OBLIGACION MENSUAL" in texto_upper or "MERCADO PAGO" in texto_upper:
             tipo_doc = "MONOTRIBUTO"
-        elif "ATM" in texto or "ADMINISTRACION TRIBUTARIA MENDOZA" in texto or "CUMPLIMIENTO FISCAL" in texto:
+        elif "ATM" in texto_upper or "ADMINISTRACION TRIBUTARIA MENDOZA" in texto_upper or "CUMPLIMIENTO FISCAL" in texto_upper:
             tipo_doc = "ATM"
 
-        match_cuit_completo = re.search(r'\b(?:20|23|27|30|33|34)-?\d{8}-?\d{1}\b', texto)
-        if match_cuit_completo:
-            cuit_encontrado = match_cuit_completo.group(0).replace("-", "")
+        # 2. Extracción precisa del CUIT del emisor
+        # Buscamos patrones de CUIT (evitando el CUIT comprador genérico si es posible)
+        matches_cuits = re.findall(r'\b(20|23|27|30|33|34)[-]?\d{8}[-]?\d{1}\b', texto_completo)
+        
+        if matches_cuits:
+            # En facturas, el CUIT del emisor suele estar al inicio o cerca de la razón social.
+            # Tomamos el primer CUIT válido que aparece en el documento.
+            cuit_crudo = matches_cuits[0] if isinstance(matches_cuits[0], str) else matches_cuits[0][0]
+            
+            # Buscar el CUIT completo con sus guiones o formato limpio
+            for m in re.finditer(r'\b(?:20|23|27|30|33|34)-?\d{8}-?\d{1}\b', texto_completo):
+                cuit_candidato = m.group(0).replace("-", "")
+                # Excluimos el CUIT del Hospital Central si llega a aparecer en el cuerpo de la factura
+                if cuit_candidato != "27359260186": # CUIT comprador común de ejemplo
+                    cuit_encontrado = cuit_candidato
+                    break
+            if cuit_encontrado == "SIN_CUIT_IDENTIFICADO" and matches_cuits:
+                cuit_encontrado = re.sub(r'[^0-9]', '', str(matches_cuits[0]))
 
     except Exception:
         pass
@@ -67,13 +89,13 @@ if verificar_login():
         st.session_state.autenticado = False
         st.rerun()
 
-    st.title("📁 Sistema de Unificación Ordenada por CUIT")
-    st.write("Clasificación estricta: 1º Factura, 2º Monotributo, 3º ATM agrupados por contribuyente.")
+    st.title("📁 Sistema de Unificación y Orden Estricto por CUIT")
+    st.write("Agrupación por contribuyente con orden obligatorio: 1º Factura, 2º Monotributo, 3º ATM.")
 
     correo_hospital = "facturaslagomaggiore@gmail.com"
 
     archivos_subidos = st.file_uploader(
-        "Subir lote masivo de PDFs (Facturas, Monotributo, ATM)", 
+        "Subir lote masivo de PDFs (Facturas, Monotributo, ATM de todos los clientes)", 
         type=["pdf"], 
         accept_multiple_files=True
     )
@@ -85,7 +107,7 @@ if verificar_login():
             clientes_dict = {}
             rutas_temporales = []
 
-            with st.spinner("Analizando y clasificando documentos por contribuyente..."):
+            with st.spinner("Analizando documentos y aislando CUITs por emisor..."):
                 for archivo in archivos_subidos:
                     ruta_temp = os.path.join(CARPETA_TEMPORAL, archivo.name)
                     try:
@@ -93,7 +115,7 @@ if verificar_login():
                             f.write(archivo.getbuffer())
                         rutas_temporales.append(ruta_temp)
 
-                        tipo_doc, cuit = clasificar_y_extraer_datos(ruta_temp)
+                        tipo_doc, cuit = identificar_cliente_y_tipo(ruta_temp)
                         
                         if cuit not in clientes_dict:
                             clientes_dict[cuit] = {"FACTURA": [], "MONOTRIBUTO": [], "ATM": [], "OTRO": []}
@@ -102,8 +124,9 @@ if verificar_login():
                     except Exception:
                         pass
 
-            st.success(f"¡Proceso exitoso! Se identificaron {len(clientes_dict)} contribuyentes.")
+            st.success(f"¡Proceso exitoso! Se agruparon los documentos para {len(clientes_dict)} clientes.")
 
+            # Generación del ZIP con orden estricto: Factura -> Monotributo -> ATM
             zip_path = os.path.join(CARPETA_TEMPORAL, "Expedientes_Ordenados_Hospital.zip")
             archivos_generados = {}
             
@@ -111,6 +134,7 @@ if verificar_login():
                 for cuit, docs in clientes_dict.items():
                     merger = PdfMerger()
                     
+                    # Orden estricto requerido
                     orden_tipos = ["FACTURA", "MONOTRIBUTO", "ATM", "OTRO"]
                     for tipo in orden_tipos:
                         for f_path in docs[tipo]:
@@ -154,7 +178,7 @@ if verificar_login():
                         
                         gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={correo_hospital}&su={urllib.parse.quote(asunto_mail)}&body={urllib.parse.quote(cuerpo_mail)}"
                         st.markdown(f"[✉️ Abrir Gmail para CUIT {cuit}]({gmail_url})", unsafe_allow_html=True)
-                        st.caption("*(Adjuntá el PDF del CUIT descargado desde el ZIP)*")
+                        st.caption("*(Recordá adjuntar el PDF descargado del CUIT correspondiente)*")
 
                     with col2:
                         st.markdown("#### 💬 Alertas de WhatsApp")
