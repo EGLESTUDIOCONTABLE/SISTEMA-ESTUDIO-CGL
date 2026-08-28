@@ -36,10 +36,6 @@ def verificar_login():
     return True
 
 def clasificar_y_extraer_datos(ruta_pdf):
-    """
-    Analiza el PDF para determinar su tipo (Factura, Monotributo, ATM)
-    y extrae el CUIT del contribuyente emisor/titular de manera precisa.
-    """
     tipo_doc = "OTRO"
     cuit_encontrado = "SIN_CUIT"
     
@@ -49,7 +45,6 @@ def clasificar_y_extraer_datos(ruta_pdf):
         for pagina in reader.pages:
             texto += (pagina.extract_text() or "").upper()
 
-        # Identificar tipo de documento
         if "FACTURA" in texto or "CAE N°" in texto or "PUNTO DE VENTA" in texto:
             tipo_doc = "FACTURA"
         elif "MONOTRIBUTO" in texto or "VEP" in texto or "OBLIGACION MENSUAL" in texto:
@@ -57,16 +52,9 @@ def clasificar_y_extraer_datos(ruta_pdf):
         elif "ATM" in texto or "ADMINISTRACION TRIBUTARIA MENDOZA" in texto or "CUMPLIMIENTO FISCAL" in texto:
             tipo_doc = "ATM"
 
-        # Buscar CUITs en el texto (excluyendo el del Hospital si aparece)
-        cuits = re.findall(r'\b(20|23|27|30|33|34)-?\d{8}-?\d{1}\b', texto)
-        if cuits:
-            # Tomamos el primer CUIT que no sea de un cliente masivo típico si fuera necesario, 
-            # pero filtramos para que sea coherente.
-            cuit_limpio = cuits[0] if isinstance(cuits[0], str) else cuits[0][0] # por seguridad
-            # Buscamos específicamente formato con guiones o sin guiones
-            match_cuit_completo = re.search(r'\b(?:20|23|27|30|33|34)-?\d{8}-?\d{1}\b', texto)
-            if match_cuit_completo:
-                cuit_encontrado = match_cuit_completo.group(0).replace("-", "")
+        match_cuit_completo = re.search(r'\b(?:20|23|27|30|33|34)-?\d{8}-?\d{1}\b', texto)
+        if match_cuit_completo:
+            cuit_encontrado = match_cuit_completo.group(0).replace("-", "")
 
     except Exception:
         pass
@@ -116,7 +104,6 @@ if verificar_login():
 
             st.success(f"¡Proceso exitoso! Se identificaron {len(clientes_dict)} contribuyentes.")
 
-            # Generación del ZIP ordenado estrictamente: Factura -> Monotributo -> ATM
             zip_path = os.path.join(CARPETA_TEMPORAL, "Expedientes_Ordenados_Hospital.zip")
             archivos_generados = {}
             
@@ -124,7 +111,6 @@ if verificar_login():
                 for cuit, docs in clientes_dict.items():
                     merger = PdfMerger()
                     
-                    # Orden estricto solicitado
                     orden_tipos = ["FACTURA", "MONOTRIBUTO", "ATM", "OTRO"]
                     for tipo in orden_tipos:
                         for f_path in docs[tipo]:
@@ -156,7 +142,7 @@ if verificar_login():
             st.markdown("---")
             st.markdown("### 📨 Panel de Control y Enlaces")
 
-            for cuit, docs in clientes_dict.items]:
+            for cuit, docs in clientes_dict.items():
                 total_archivos = len(docs["FACTURA"]) + len(docs["MONOTRIBUTO"]) + len(docs["ATM"]) + len(docs["OTRO"])
                 with st.expander(f"CUIT: {cuit} — Documentos detectados: {total_archivos} (Facturas: {len(docs['FACTURA'])}, Monotributo: {len(docs['MONOTRIBUTO'])}, ATM: {len(docs['ATM'])})"):
                     
